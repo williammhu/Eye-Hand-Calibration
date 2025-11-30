@@ -1,99 +1,101 @@
 """
-Lightweight Freenove robot arm client used by the planar hand-eye calibration script.
+Freenove robot arm client that speaks the same TCP text protocol as the official app.
 
-This module does not implement the full Freenove protocol; instead it offers a
-simple TCP-based interface that mirrors the commands provided by the official
-Python server.  If you run the Freenove "Server.py" on the Raspberry Pi, the
-server accepts a single-line JSON command such as:
-
-    {"cmd": "move", "x": 100, "y": 150, "z": 80, "speed": 50}
-
-The :class:`FreenoveArmClient` class sends these commands to the configured
-``host``/``port``.  When ``dry_run=True`` (the default), commands are only
-printed so the script can be exercised on a development machine without the
-hardware.
+The Freenove desktop UI (see ``main.py``/``client.py``) sends simple ASCII
+commands such as ``G0 X0 Y200 Z45`` to port 5000.  This wrapper reuses the
+existing `Client` class so calibration scripts can drive the arm directly
+without duplicating socket handling code.  When ``dry_run=True`` commands are
+printed instead of sent, which is handy for debugging on a machine without the
+arm attached.
 """
 
 from __future__ import annotations
 
-import json
-import socket
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Optional
+
+from client import Client
+from command import Command
 
 
 @dataclass
 class FreenoveArmClient:
-    """Minimal client for the Freenove Robot Arm server.
-
-    Parameters
-    ----------
-    host: str
-        IP address of the Raspberry Pi running the Freenove server.
-    port: int
-        TCP port exposed by the Freenove server (default 20001 in the examples).
-    dry_run: bool
-        When ``True``, print commands instead of sending them to hardware.
-    timeout: float
-        Socket timeout in seconds when ``dry_run`` is ``False``.
-    """
-
     host: str = "127.0.0.1"
-    port: int = 20001
+    port: int = 5000
     dry_run: bool = True
-    timeout: float = 2.0
+    auto_enable: bool = True
 
-    _socket: Optional[socket.socket] = None
+    _client: Optional[Client] = field(default=None, init=False, repr=False)
+    _cmd: Command = field(default_factory=Command, init=False, repr=False)
 
     def __enter__(self) -> "FreenoveArmClient":
         self.connect()
+        if self.auto_enable:
+            self.enable_motors(True)
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
+    # Connection helpers -------------------------------------------------
     def connect(self) -> None:
         """Open the TCP connection unless running in dry-run mode."""
 
         if self.dry_run:
             return
-        if self._socket is None:
-            self._socket = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        if self._client is None:
+            self._client = Client()
+            self._client.port = self.port
+            if not self._client.connect(self.host):
+                self._client = None
+                raise RuntimeError(f"Could not connect to Freenove arm at {self.host}:{self.port}")
 
     def close(self) -> None:
-        """Close the underlying socket if it was opened."""
-
-        if self._socket is not None:
+        if self._client is not None:
             try:
-                self._socket.close()
+                self._client.disconnect()
             finally:
-                self._socket = None
+                self._client = None
 
-    def move_to(self, x: float, y: float, z: float, speed: int = 50) -> None:
-        """Send a cartesian move command to the robot arm.
+    # Command primitives --------------------------------------------------
+    def _send(self, text: str) -> None:
+        """Send a raw command line, adding CRLF to match the app behaviour."""
 
-        The Freenove server understands JSON objects terminated by a newline.  If
-        you use a different command schema, adjust the payload in this method.
-        """
-
-        payload = {"cmd": "move", "x": x, "y": y, "z": z, "speed": speed}
-        encoded = json.dumps(payload)
         if self.dry_run:
-            print(f"[dry-run] send -> {encoded}")
+            print(f"[dry-run] {text}")
             return
 
-        if self._socket is None:
+        if self._client is None or not self._client.connect_flag:
             self.connect()
-        if self._socket is None:
-            raise RuntimeError("Socket could not be opened")
+        if self._client is None or not self._client.connect_flag:
+            raise RuntimeError("Socket is not connected")
+        self._client.send_messages(text + "\r\n")
 
-        self._socket.sendall(encoded.encode("utf-8") + b"\n")
+    def enable_motors(self, enable: bool = True) -> None:
+        """Mirror the UI \"Load Motor\" toggle (S8 E0 to enable, S8 E1 to relax)."""
+
+        state = "0" if enable else "1"
+        cmd = f"{self._cmd.CUSTOM_ACTION}8 {self._cmd.ARM_ENABLE}{state}"
+        self._send(cmd)
+
+    def move_to(self, x: float, y: float, z: float, speed: int | None = None) -> None:
+        """
+        Absolute move in millimetres.
+
+        The native protocol encodes position as ``G0 X.. Y.. Z..``.  A feed
+        rate/speed parameter is not currently supported by the firmware; the
+        optional ``speed`` argument is accepted for API compatibility and
+        ignored if provided.
+        """
+
+        cmd = (
+            f"{self._cmd.MOVE_ACTION}0 "
+            f"{self._cmd.AXIS_X_ACTION}{x:.1f} "
+            f"{self._cmd.AXIS_Y_ACTION}{y:.1f} "
+            f"{self._cmd.AXIS_Z_ACTION}{z:.1f}"
+        )
+        self._send(cmd)
 
     def wait(self, seconds: float) -> None:
-        """Placeholder for compatibility with the calibration loop."""
-
-        # The Freenove reference server does not expose an explicit wait command.
-        # The caller can `time.sleep` directly, but we keep this method to match
-        # the calibration code structure and to leave room for future status
-        # polling.
-        return
+        time.sleep(seconds)
