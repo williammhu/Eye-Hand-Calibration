@@ -5,6 +5,12 @@ This version speaks the same TCP text protocol as the Freenove desktop app,
 via :class:`freenove_arm.FreenoveArmClient`.  It estimates a 2D homography
 between camera pixels and the robot table plane using an ArUco marker attached
 to the gripper.
+树莓派终端输入：
+cd Freenove_Robot_Arm_Kit_for_Raspberry_Pi/Server/Code
+sudo python main.py
+cmd 输入：
+ping -4 raspberrypi.local
+
 """
 
 from __future__ import annotations
