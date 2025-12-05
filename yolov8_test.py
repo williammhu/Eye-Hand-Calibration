@@ -6,13 +6,12 @@ import time
 import cv2
 import numpy as np
 import serial
-from openni import openni2
+
 from ultralytics import YOLO
 
 from multiprocessing import Process, Value, Queue, Array
 
-from orbbec_init import initialize_openni, configure_depth_stream, convert_depth_to_xyz
-from port_test import Ser
+
 
 
 def orbbec_video(center_p_queue, robot_status):
