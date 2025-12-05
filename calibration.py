@@ -10,7 +10,8 @@ cd Freenove_Robot_Arm_Kit_for_Raspberry_Pi/Server/Code
 sudo python main.py
 cmd 输入：
 ping -4 raspberrypi.local
-
+电脑测试：python calibration.py --mode calibrate --host 127.0.0.1 --port 5000 --dry-run
+机械臂运行： python calibration.py --mode calibrate --host 10.149.65.232 --port 5000 --camera-id 1
 """
 
 from __future__ import annotations
