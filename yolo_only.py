@@ -8,7 +8,7 @@ Usage examples
 
 2) Image or video file:
    python yolo_only.py --weights best.pt --source path/to/file.mp4 --decode
-
+python yolo_only.py --decode
 Press q to quit the display window.
 """
 
@@ -28,13 +28,38 @@ def parse_args():
     p.add_argument("--conf", type=float, default=0.5, help="Confidence threshold")
     p.add_argument("--imgsz", type=int, default=640, help="Inference size")
     p.add_argument("--decode", action="store_true", help="Decode barcode/QR using pyzbar and print text")
+    p.add_argument(
+        "--allow-pdf417",
+        action="store_true",
+        help="Include PDF417 symbology in decoding (disabled by default to avoid zbar assertion warnings)",
+    )
     return p.parse_args()
 
 
-def decode_with_pyzbar(frame):
-    """Decode one frame via pyzbar. Returns parsed text or None."""
+def decode_with_pyzbar(frame, allow_pdf417=False):
+    """
+    Decode one frame via pyzbar. Returns parsed text or None.
+    PDF417 decoding is disabled by default to avoid zbar assertion warnings on some frames.
+    """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    decoded = pyzbar.decode(gray)
+    # Limit symbologies to avoid zbar's PDF417 assertion; user can re-enable via flag.
+    symbols = None
+    if not allow_pdf417:
+        symbols = [
+            pyzbar.ZBarSymbol.CODE128,
+            pyzbar.ZBarSymbol.CODE39,
+            pyzbar.ZBarSymbol.EAN13,
+            pyzbar.ZBarSymbol.EAN8,
+            pyzbar.ZBarSymbol.UPCA,
+            pyzbar.ZBarSymbol.UPCE,
+            pyzbar.ZBarSymbol.I25,
+            pyzbar.ZBarSymbol.DATABAR,
+            pyzbar.ZBarSymbol.DATABAR_EXP,
+            pyzbar.ZBarSymbol.CODABAR,
+            pyzbar.ZBarSymbol.QRCODE,
+        ]
+
+    decoded = pyzbar.decode(gray, symbols=symbols)
     for obj in decoded:
         try:
             text = obj.data.decode("utf-8", errors="ignore")
@@ -97,7 +122,7 @@ def main():
         vis = results[0].plot()
 
         if args.decode:
-            decoded_text = decode_with_pyzbar(frame)
+            decoded_text = decode_with_pyzbar(frame, allow_pdf417=args.allow_pdf417)
             if decoded_text:
                 print(f"[PYZBAR] {decoded_text}")
                 cv2.putText(vis, decoded_text[:60], (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2)
