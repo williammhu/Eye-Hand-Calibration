@@ -1,239 +1,244 @@
-import ctypes
-import os
+﻿"""
+YOLOv8 + hand-eye calibration (planar homography) pick-and-place demo.
+
+Workflow
+--------
+1) Run calibration.py --mode calibrate (or calibration_test.py) to generate
+   save_parms/homography.npy / homography_inv.npy.
+2) Place objects on the same plane used for calibration.
+3) Start this script. It will:
+   - detect objects with YOLOv8,
+   - map the pixel centre to robot XY via the homography,
+   - send the target to the Freenove arm client.
+
+The detection loop stays in the main thread (so OpenCV windows work on Windows);
+robot motion runs in a background thread and processes one target at a time.
+Press q to quit.
+"""
+
+from __future__ import annotations
+
+import argparse
+import queue
 import threading
 import time
+from typing import Optional, Sequence, Set, Tuple
 
 import cv2
 import numpy as np
-import serial
-
 from ultralytics import YOLO
 
-from multiprocessing import Process, Value, Queue, Array
+from calibration import HomographyResult
+from freenove_arm import FreenoveArmClient
 
 
+# --------------------------------------------------------------------------- #
+# Utility helpers
+# --------------------------------------------------------------------------- #
+def pixel_to_robot(pixel: Sequence[float], homography: np.ndarray) -> Tuple[float, float]:
+    """Map (u, v) pixel to robot XY using a 3x3 homography."""
+    pt = np.array([pixel[0], pixel[1], 1.0], dtype=np.float64)
+    mapped = homography @ pt
+    mapped /= mapped[2]
+    return float(mapped[0]), float(mapped[1])
 
 
-def orbbec_video(center_p_queue, robot_status):
+def select_best_box(result, allowed: Optional[Set[str]]) -> Optional[int]:
     """
-    使用相机进行视频捕捉和物体检测的函数。
-    
-    参数:
-    - center_p_queue: 一个队列，用于存储检测到的物体中心点在相机坐标系下的坐标。
-    - robot_status: 一个共享变量，用于指示机器人的工作状态（搜索或运行）。
-    
-    无返回值。
+    Return index of the highest-confidence detection that matches the
+    allowed class names (or any class if ``allowed`` is ``None``).
     """
-    model = YOLO('best.pt')
-    redist_path = "F:\study-python\dabeipro\OpenNI_2.3.0.86_202210111950_4c8f5aa4_beta6_windows\Win64-Release\sdk\libs"
-    width, height, fps = 640, 400, 30
-    fx, fy, cx, cy = 524.382751, 524.382751, 324.768829, 212.350189
+    boxes = result.boxes
+    if boxes is None or len(boxes) == 0:
+        return None
 
-    def mouse_callback(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDBLCLK:
-            print(x, y, img[y, x])
-            print("三维坐标：", convert_depth_to_xyz(x, y, img[y, x], fx, fy, cx, cy))
+    best_idx = None
+    best_conf = 0.0
+    for i in range(len(boxes)):
+        conf = float(boxes.conf[i])
+        cls_id = int(boxes.cls[i])
+        cls_name = result.names[cls_id]
+        if allowed and cls_name not in allowed:
+            continue
+        if conf > best_conf:
+            best_conf = conf
+            best_idx = i
+    return best_idx
 
-    dev = initialize_openni(redist_path)
-    print(dev.get_device_info())
-    depth_stream = configure_depth_stream(dev, width, height, fps)
-    cv2.namedWindow('depth')
-    cv2.namedWindow('color')
-    # cv2.setMouseCallback('depth', mouse_callback)
-    cap = cv2.VideoCapture(0)
-    fps = 0.0
 
+# --------------------------------------------------------------------------- #
+# Robot worker
+# --------------------------------------------------------------------------- #
+def robot_worker(args: argparse.Namespace, target_queue: "queue.Queue", busy_flag: threading.Event) -> None:
+    """
+    Blocking loop that consumes targets from the queue and drives the robot.
+    Each target is a tuple (x_mm, y_mm, z_mm, cls_id).
+    """
     try:
+        with FreenoveArmClient(
+            host=args.host,
+            port=args.port,
+            dry_run=args.dry_run,
+            auto_enable=not args.skip_enable,
+        ) as arm:
+            print("[robot] connected to arm")
+            while True:
+                item = target_queue.get()
+                if item is None:
+                    break
 
+                x, y, z, cls_id = item
+                approach_z = z + args.approach
+                print(f"[robot] target ({x:.1f}, {y:.1f}, {z:.1f}) cls={cls_id}")
+
+                # Simple 3-step pick motion; adjust timings to your hardware.
+                arm.move_to(x, y, approach_z, speed=args.speed)
+                time.sleep(args.settle)
+                arm.move_to(x, y, z, speed=args.speed)
+                time.sleep(args.grasp_time)
+                arm.move_to(x, y, approach_z, speed=args.speed)
+
+                busy_flag.clear()
+    except Exception as exc:  # pragma: no cover - hardware path
+        print(f"[robot] error: {exc}")
+        busy_flag.clear()
+
+
+# --------------------------------------------------------------------------- #
+# Detection loop (runs in main thread)
+# --------------------------------------------------------------------------- #
+def detection_loop(args: argparse.Namespace) -> None:
+    try:
+        homography = HomographyResult.load(args.parms_dir).homography
+    except FileNotFoundError:
+        raise SystemExit(
+            f"Homography files not found in '{args.parms_dir}'. "
+            "Please run calibration.py --mode calibrate first."
+        )
+
+    model = YOLO(args.weights)
+    cap = cv2.VideoCapture(args.camera_id)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+    cap.set(cv2.CAP_PROP_FPS, args.fps)
+
+    if not cap.isOpened():
+        raise SystemExit("Could not open camera")
+
+    allowed = set(args.classes) if args.classes else None
+    target_queue: queue.Queue = queue.Queue(maxsize=1)
+    busy_flag = threading.Event()
+
+    robot_thread = threading.Thread(
+        target=robot_worker,
+        args=(args, target_queue, busy_flag),
+        daemon=True,
+    )
+    robot_thread.start()
+
+    last_sent = 0.0
+    try:
         while True:
-            t1 = time.time()
+            ok, frame = cap.read()
+            if not ok:
+                print("[vision] failed to read frame")
+                break
 
-            # 开始读取深度视频流
-            frame = depth_stream.read_frame()
-            # intr = frame.profile.as_video_stream_profile().intrinsics
-            # print(intr)
-            frame_data = frame.get_buffer_as_uint16()
-            # print(frame_data)
-            img = np.ndarray((frame.height, frame.width), dtype=np.uint16, buffer=frame_data)
-            dim_gray = cv2.convertScaleAbs(img, alpha=0.17)
+            result = model.predict(
+                source=frame,
+                conf=args.conf,
+                verbose=False,
+                imgsz=args.imgsz,
+            )[0]
 
-            kernel_size = 5
-            dim_gray = cv2.medianBlur(dim_gray, kernel_size)
-            depth_colormap = cv2.applyColorMap(dim_gray, 2)
-            # 开始读取彩色视频流
-            ret, frame = cap.read()
-            frame = cv2.resize(frame, (640, 400))
-            frame = cv2.flip(frame, 1)
-            # 开始推理
-            results = model.predict(source=frame, **{'save': False, 'conf': 0.62, 'verbose': False}, )
-            result = results[0].boxes.data.tolist()
-            result_list = []
-            max_score_bbox = [0, 0, 0, 0]
-            category_dict = {
-                'plastic bottle': 0,
-                'glass bottle': 0,
-                'mask': 1,
-                'gauze': 1,
-                'injector': 2
-            }
-            for idx in range(len(result)):
-                xmin = int(result[idx][0])
-                ymin = int(result[idx][1])
-                xmax = int(result[idx][2])
-                ymax = int(result[idx][3])
-                conf = round(float(result[idx][4]), 2)
-                cls_idx = int(result[idx][5])
-                cls_name = model.names[cls_idx]
-                result_list.append([ymin, xmin, ymax, xmax, conf, cls_idx, cls_name])
-                cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
-                box_color = (0, 0, 255)
+            best_idx = select_best_box(result, allowed)
+            status = "No target"
 
-                x = int((xmax - xmin) / 2 + xmin)
-                y = int((ymax - ymin) / 2 + ymin)
-                # print(result_list, "中点:", x, y, conf, cls_name)
-                if y > 400:
-                    print("目标超出深度图像范围")
-                    continue
-                if conf > max_score_bbox[0]:
-                    max_score_bbox[0] = conf
-                    max_score_bbox[1:] = [x, y, category_dict[cls_name]]
-                    # put text under box
+            if best_idx is not None:
+                xyxy = result.boxes.xyxy[best_idx].cpu().numpy()
+                cls_id = int(result.boxes.cls[best_idx])
+                conf = float(result.boxes.conf[best_idx])
+                cx = float((xyxy[0] + xyxy[2]) / 2.0)
+                cy = float((xyxy[1] + xyxy[3]) / 2.0)
+                rx, ry = pixel_to_robot((cx, cy), homography)
 
-                # center_p_queue.put([x_cam, y_cam, z_cam])
-                # print("center_p_queue执行")
-                x_cam, y_cam, z_cam = convert_depth_to_xyz(x, y, img[y, x], fx, fy, cx, cy)
-                cv2.circle(frame, (x,y), 3, (0, 0, 255), -1)
-                cv2.putText(frame, cls_name, (xmin, ymin + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.8, box_color, 2)
-                cv2.putText(frame, "x: {:.3f}".format(x_cam), (xmin, ymin + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                            box_color, 2)
-                cv2.putText(frame, "y: {:.3f}".format(y_cam), (xmin, ymin + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                            box_color, 2)
-                cv2.putText(frame, "z: {:.3f}".format(z_cam), (xmin, ymin + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                            box_color, 2)
-            # print("conf最大", max_score_bbox)
-            x_cam, y_cam, z_cam = convert_depth_to_xyz(max_score_bbox[1], max_score_bbox[2],
-                                                       img[max_score_bbox[2], max_score_bbox[1]], fx, fy, cx, cy)
+                # draw overlay
+                cv2.rectangle(frame, (int(xyxy[0]), int(xyxy[1])), (int(xyxy[2]), int(xyxy[3])), (0, 255, 0), 2)
+                cv2.circle(frame, (int(cx), int(cy)), 4, (0, 0, 255), -1)
+                cv2.putText(
+                    frame,
+                    f"{result.names[cls_id]} {conf:.2f}",
+                    (int(xyxy[0]), int(xyxy[1]) - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (255, 255, 255),
+                    2,
+                )
+                cv2.putText(
+                    frame,
+                    f"robot XY=({rx:.1f},{ry:.1f})",
+                    (int(xyxy[0]), int(xyxy[1]) + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0),
+                    2,
+                )
 
-            if robot_status.value == 0 and max_score_bbox[0] > 0.25:
-                center_p_queue.put([x_cam, y_cam, z_cam, max_score_bbox[-1]])
-                print(x_cam, y_cam, z_cam)
-                print("center_p_queue执行")
-                robot_status.value = 1
-            #     # 处理深度图像，生成深度图的彩色版本
-            #     depth_img = np.asanyarray(depth.get_data())
-            #     depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_img, alpha=alpha_val), cv2.COLORMAP_JET)
-            fps = (fps + (1. / (time.time() - t1))) / 2
-            depth_colormap = cv2.putText(depth_colormap, "fps= %.2f" % (fps), (0, 40), cv2.FONT_HERSHEY_SIMPLEX, 1,(0, 255, 0), 2)
-            # 根据机器人的状态，在图像上显示状态信息
-            if robot_status.value == 0:
-                status_text = "Status: Searching"
-            else:
-                status_text = "Status: Running"
-            cv2.putText(frame, status_text, (400, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0) if robot_status == 0 else (0, 0, 255), 2)
+                now = time.time()
+                if (not busy_flag.is_set()) and conf >= args.min_pick_conf and (now - last_sent) >= args.cooldown:
+                    target_queue.put((rx, ry, args.z_height, cls_id))
+                    busy_flag.set()
+                    last_sent = now
+                    status = "Target sent to robot"
+                elif busy_flag.is_set():
+                    status = "Robot busy"
+                else:
+                    status = "Holding target"
 
-            # 将颜色图像和深度图像叠加显示
-            # images = np.vstack((color_image, depth_colormap))
-            cv2.imshow('color', frame)
-            cv2.imshow('depth', depth_colormap)
-
-            key = cv2.waitKey(10)
-            if int(key) == 113:
+            cv2.putText(frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            cv2.imshow("yolo + hand-eye", frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
                 break
     finally:
-        # pipeline.stop()  # 关闭相机和视频写入器
-        openni2.unload()
-        dev.close()
+        target_queue.put(None)
+        robot_thread.join(timeout=5)
+        cap.release()
+        cv2.destroyAllWindows()
 
-def send_message(contunts):
-    if ser.isOpen():  # 如果串口已经打开
-        if contunts:
-            # com1端口向com2端口写入数据 字符串必须译码
-            # self.contunts = input("输入内容:")
-            # 可以自定义输入Gcode命令，规划路径，例如 G1 X10 Y10 Z10 F30，其实就是三维坐标和速度
-            ser.write((contunts + "\r").encode("utf-8"))
-            time.sleep(1)
-            # encode()函数是将字符串转化成相应编码方式的字节形式
-            # 如str2.encode('utf-8')，表示将unicode编码的字符串str2转换成utf-8编码的字节数据。
-            # 如果不转换，COM1发送到COM2的信息，COM2（调试助手）中文会识别不出来或者会出现乱码现象
-    else:
-        print("open failed")
-def robot_grasp(center_p_queue, robot_status):
-    """
-    使用dobot机械臂进行抓取操作。
 
-    参数:
-    - center_p_queue: 队列，包含目标中心点的位置信息。
-    - robot_status: 共享变量，用于控制机械臂的状态。
-    """
-    if os.path.exists("./save_parms/image_to_arm.npy"):
-        image_to_arm = np.load("./save_parms/image_to_arm.npy")
-    else:
-        print("image_to_arm.npy not exist")
-        return
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Combine YOLOv8 detection with homography-based hand-eye calibration")
+    parser.add_argument("--weights", type=str, default="best.pt", help="YOLO model weights")
+    parser.add_argument("--camera-id", type=int, default=0, help="OpenCV camera index")
+    parser.add_argument("--width", type=int, default=1280, help="Camera capture width")
+    parser.add_argument("--height", type=int, default=720, help="Camera capture height")
+    parser.add_argument("--fps", type=int, default=30, help="Camera FPS hint")
+    parser.add_argument("--imgsz", type=int, default=640, help="YOLO inference size")
+    parser.add_argument("--conf", type=float, default=0.35, help="YOLO detection confidence threshold")
+    parser.add_argument("--min-pick-conf", type=float, default=0.5, help="Minimum confidence to send a pick command")
+    parser.add_argument("--classes", nargs="*", help="Optional class name filter for picking")
+    parser.add_argument("--parms-dir", type=str, default="save_parms", help="Directory containing homography.npy")
+    parser.add_argument("--z-height", type=float, default=70.0, help="Table Z height for picking (mm)")
+    parser.add_argument("--approach", type=float, default=40.0, help="Approach offset above the table (mm)")
+    parser.add_argument("--cooldown", type=float, default=3.0, help="Minimum seconds between pick commands")
+    parser.add_argument("--speed", type=int, default=50, help="Robot move speed hint")
+    parser.add_argument("--settle", type=float, default=0.5, help="Pause after each move (s)")
+    parser.add_argument("--grasp-time", type=float, default=1.0, help="Hold time at grasp height (s)")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Robot IP address")
+    parser.add_argument("--port", type=int, default=5000, help="Robot TCP port")
+    parser.add_argument("--dry-run", action="store_true", help="Print commands instead of sending to robot")
+    parser.add_argument("--skip-enable", action="store_true", help="Do not send motor enable command on connect")
+    return parser.parse_args()
 
-    # 初始化
-    ser.write("G28\r".encode("utf-8"))
-    # send_message("M114")
-    print("发送成功")
-    # robot_status.value = 0
 
-    while True:
-        # 循环等待并处理目标中心点信息
-        if robot_status.value:
-
-            center_p = center_p_queue.get()
-            center = center_p[0:3]
-
-            # 计算机械臂需要移动到的位置
-            img_pos = np.ones(4)
-            img_pos[0:3] = center
-            arm_pos = np.dot(image_to_arm, np.array(img_pos))
-            print("arm_pos", arm_pos)
-            # 如果目标位置超出机械臂可达范围，则跳过此次操作
-
-            send_message(f"G1 X{0} Y{185} Z{160}")  # 回原点
-
-            send_message(f"G1 X{arm_pos[0]} Y{arm_pos[1]} Z{arm_pos[2]+80} ")  # 移动到目标上方50mm处
-
-            send_message(f"G1 X{arm_pos[0]} Y{arm_pos[1]} Z{arm_pos[2]-25} ")  # 移动到目标上方处
-
-            send_message("M5")  # 执行抓取
-            time.sleep(5)
-            send_message(f"G1 X{arm_pos[0]} Y{arm_pos[1]} Z{arm_pos[2]+80} ")  # 再次移动到目标上方20mm处
-            if center_p[3] == 0:
-                send_message(f"G1 X{170} Y{0} Z{160}")  # 病理性废物位置
-            if center_p[3] == 2:
-                send_message(f"G1 X{-170} Y{30} Z{160}")  # 损伤性废物位置
-            if center_p[3] == 1:
-                send_message(f"G1 X{170} Y{120} Z{160}")  # 感染性废物
-            send_message("M3")  # 打开夹爪
-            time.sleep(4)
-
-            # action.send_message(f"G1 X{0} Y{185} Z{160} ")  # 返回原点
-            print("another one")
-            # 重置为搜索状态
-            robot_status.value = 0
-
-        else:
-            # 如果没有检测到目标标记，重置为搜索状态
-            print("no marker detected")
-            time.sleep(3)
-            # robot_status.value = 0
-            continue
+def main() -> None:
+    args = parse_args()
+    detection_loop(args)
 
 
 if __name__ == "__main__":
-    center_arr = Array(ctypes.c_double, [0, 0, 0])  # 存储中心点坐标
-    robot_status = Value(ctypes.c_int8, 0)
-    center_p_queue = Queue()
-
-    ser = serial.Serial("COM5", baudrate=115200, timeout=2, )
-    time.sleep(2)
-
-    process1 = Process(target=orbbec_video, args=(center_p_queue, robot_status,))
-    # process2 = Process(target=robot_grasp, args=(center_p_queue, robot_status,))
-    process1.start()
-    # process2.start()
-    robot_grasp(center_p_queue, robot_status)
-    process1.join()
-    # process2.join()
+    main()
