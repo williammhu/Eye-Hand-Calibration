@@ -122,10 +122,30 @@ def main():
         vis = results[0].plot()
 
         if args.decode:
-            decoded_text = decode_with_pyzbar(frame, allow_pdf417=args.allow_pdf417)
-            if decoded_text:
-                print(f"[PYZBAR] {decoded_text}")
-                cv2.putText(vis, decoded_text[:60], (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2)
+            h, w = frame.shape[:2]
+            boxes = results[0].boxes
+            if boxes is not None and boxes.xyxy is not None:
+                for box in boxes.xyxy.cpu().numpy():
+                    x1, y1, x2, y2 = box.astype(int)
+                    x1 = max(0, min(x1, w - 1))
+                    x2 = max(0, min(x2, w - 1))
+                    y1 = max(0, min(y1, h - 1))
+                    y2 = max(0, min(y2, h - 1))
+                    if x2 <= x1 or y2 <= y1:
+                        continue
+                    crop = frame[y1:y2, x1:x2]
+                    decoded_text = decode_with_pyzbar(crop, allow_pdf417=args.allow_pdf417)
+                    if decoded_text:
+                        print(f"[PYZBAR] {decoded_text}")
+                        cv2.putText(
+                            vis,
+                            decoded_text[:60],
+                            (x1 + 5, max(20, y1 + 20)),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.8,
+                            (0, 200, 255),
+                            2,
+                        )
 
         fps = 1.0 / (time.time() - start + 1e-6)
         fps_avg = 0.8 * fps_avg + 0.2 * fps if fps_avg else fps
