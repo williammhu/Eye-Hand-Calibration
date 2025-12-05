@@ -1,5 +1,5 @@
 ﻿"""
-Quick YOLOv8 inference + ZXing decode (no robot, no hand-eye).
+Quick YOLOv8 inference + pyzbar decode (no robot, no hand-eye).
 
 Usage examples
 --------------
@@ -13,60 +13,44 @@ Press q to quit the display window.
 """
 
 import argparse
-import os
-import tempfile
 import time
 from pathlib import Path
 
 import cv2
 from ultralytics import YOLO
-
-try:
-    import zxing  # type: ignore
-
-    ZXING_AVAILABLE = True
-except Exception:
-    ZXING_AVAILABLE = False
+from pyzbar import pyzbar
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="YOLOv8 quick visualizer with optional ZXing decode")
-    p.add_argument("--weights", type=str, default="best.pt", help="Path to YOLO weights")
+    p = argparse.ArgumentParser(description="YOLOv8 quick visualizer with optional pyzbar decode")
+    p.add_argument("--weights", type=str, default=r"D:\yolo\runs\detect\train\weights\best.pt", help="Path to YOLO weights")
     p.add_argument("--source", type=str, default="0", help="Camera index or image/video path")
     p.add_argument("--conf", type=float, default=0.5, help="Confidence threshold")
     p.add_argument("--imgsz", type=int, default=640, help="Inference size")
-    p.add_argument("--decode", action="store_true", help="Decode barcode/QR using ZXing and print text")
+    p.add_argument("--decode", action="store_true", help="Decode barcode/QR using pyzbar and print text")
     return p.parse_args()
 
 
-def decode_with_zxing(reader, frame):
-    """Decode one frame via ZXing by writing a temp PNG. Returns parsed text or None."""
-    tmp_path = os.path.join(tempfile.gettempdir(), f"zxing_{int(time.time()*1000)}.png")
-    cv2.imwrite(tmp_path, frame)
-    result = reader.decode(tmp_path)
-    os.remove(tmp_path)
-    if result is None:
-        return None
-    # Some bindings expose parsed/parsed_text/raw_text attributes; fallback to text
-    for attr in ("parsed", "parsed_text", "raw", "raw_text", "text"):
-        if hasattr(result, attr):
-            val = getattr(result, attr)
-            if val:
-                return val
+def decode_with_pyzbar(frame):
+    """Decode one frame via pyzbar. Returns parsed text or None."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    decoded = pyzbar.decode(gray)
+    for obj in decoded:
+        try:
+            text = obj.data.decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+        if text:
+            return text
     return None
 
 
 def main():
     args = parse_args()
-    model = YOLO(r"D:\yolo\runs\detect\train\weights\best.pt")
+    model = YOLO(args.weights)
 
-    reader = None
     if args.decode:
-        if ZXING_AVAILABLE:
-            reader = zxing.BarCodeReader()
-            print("[ZXING] decoder enabled")
-        else:
-            print("[ZXING] zxing not importable; decode disabled")
+        print("[PYZBAR] decoder enabled")
 
     # Decide capture source
     is_cam = args.source.isdigit()
@@ -112,10 +96,10 @@ def main():
         results = model.predict(source=frame, conf=args.conf, imgsz=args.imgsz, verbose=False)
         vis = results[0].plot()
 
-        if reader is not None:
-            decoded_text = decode_with_zxing(reader, frame)
+        if args.decode:
+            decoded_text = decode_with_pyzbar(frame)
             if decoded_text:
-                print(f"[ZXING] {decoded_text}")
+                print(f"[PYZBAR] {decoded_text}")
                 cv2.putText(vis, decoded_text[:60], (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2)
 
         fps = 1.0 / (time.time() - start + 1e-6)
