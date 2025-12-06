@@ -29,9 +29,12 @@ ZXING_READER = zxing.BarCodeReader()
 def parse_args():
     p = argparse.ArgumentParser(description="YOLOv8 quick visualizer with optional ZXing decode")
     p.add_argument("--weights", type=str, default=r"D:\yolo\runs\detect\train\weights\best.pt", help="Path to YOLO weights")
-    p.add_argument("--source", type=str, default="0", help="Camera index or image/video path")
+    p.add_argument("--source", type=str, default="1", help="Camera index or image/video path")
     p.add_argument("--conf", type=float, default=0.5, help="Confidence threshold")
     p.add_argument("--imgsz", type=int, default=640, help="Inference size")
+    p.add_argument("--cam-width", type=int, default=1280, help="Requested camera width (pixels)")
+    p.add_argument("--cam-height", type=int, default=720, help="Requested camera height (pixels)")
+    p.add_argument("--cam-fps", type=int, default=30, help="Requested camera FPS")
     p.add_argument("--decode", action="store_true", help="Decode barcode/QR using ZXing and print text")
     return p.parse_args()
 
@@ -65,7 +68,7 @@ def main():
     model = YOLO(args.weights)
 
     if args.decode:
-        print("[ZXING] decoder enabled")
+        print("[ZXING] decoder enabled", flush=True)
 
     # Decide capture source
     is_cam = args.source.isdigit()
@@ -73,9 +76,17 @@ def main():
     frame_source = None
 
     if is_cam:
-        cap = cv2.VideoCapture(int(args.source))
+        cam_index = int(args.source)
+        cap = cv2.VideoCapture(cam_index)
         if not cap.isOpened():
             raise SystemExit(f"Cannot open camera {args.source}")
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.cam_width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.cam_height)
+        cap.set(cv2.CAP_PROP_FPS, args.cam_fps)
+        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
+        print(f"[CAM] requested {args.cam_width}x{args.cam_height}@{args.cam_fps} -> got {actual_w}x{actual_h}@{actual_fps:.1f}", flush=True)
         frame_source = "camera"
     else:
         path = Path(args.source)
@@ -123,8 +134,13 @@ def main():
                     y2 = max(0, min(y2, h - 1))
                     if x2 <= x1 or y2 <= y1:
                         continue
-                    crop = frame[y1:y2, x1:x2]
-                    decoded_text = decode_with_zxing(crop)
+
+                    roi = frame[y1:y2, x1:x2]
+                    roi_big = cv2.resize(roi, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_LINEAR)
+                    gray = cv2.cvtColor(roi_big, cv2.COLOR_BGR2GRAY)
+                    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+                    decoded_text = decode_with_zxing(bw)
                     if decoded_text:
                         print(f"[ZXING] {decoded_text}")
                         cv2.putText(
