@@ -1,99 +1,46 @@
 """
-Decode a single image by estimating barcode orientation and rotating accordingly.
-Run with:
+简单用 zxing 直接解码一张图片（无任何预处理/旋转）。
+用法:
     python decode_image_test.py --path <image_path>
 """
 
 import argparse
+import os
 import sys
-from typing import Iterable
 
-import cv2
-import numpy as np
-from pyzbar import pyzbar
+import zxing
 
-# Default test image path; override via CLI.
+# 默认测试图片路径，可用 CLI 参数覆盖
 IMAGE_PATH = r"D:\Eye-Hand-Calibration\1.png"
 
 
-def rotate_bound(image: np.ndarray, angle: float) -> np.ndarray:
-    """Rotate an image while keeping the full content in frame."""
-
-    (h, w) = image.shape[:2]
-    (cX, cY) = (w // 2, h // 2)
-
-    M = cv2.getRotationMatrix2D((cX, cY), -angle, 1.0)
-    cos = np.abs(M[0, 0])
-    sin = np.abs(M[0, 1])
-
-    nW = int((h * sin) + (w * cos))
-    nH = int((h * cos) + (w * sin))
-
-    M[0, 2] += (nW / 2) - cX
-    M[1, 2] += (nH / 2) - cY
-
-    return cv2.warpAffine(image, M, (nW, nH))
-
-
-def barcode_angle(gray: np.ndarray) -> float:
-    """Estimate barcode angle from a grayscale image."""
-
-    ret, binary = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY_INV)
-    kernel = np.ones((8, 8), np.uint8)
-    dilation = cv2.dilate(binary, kernel, iterations=1)
-    erosion = cv2.erode(dilation, kernel, iterations=1)
-    erosion = cv2.erode(erosion, kernel, iterations=1)
-    erosion = cv2.erode(erosion, kernel, iterations=1)
-
-    contours, hierarchy = cv2.findContours(
-        erosion, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
-    )
-    if len(contours) == 0:
-        rect = [0, 0, 0]
-    else:
-        rect = cv2.minAreaRect(contours[0])
-    return float(rect[2])
-
-
-def bar(image: np.ndarray, angle: float) -> Iterable[pyzbar.Decoded]:
-    """Rotate image to upright position and decode with pyzbar."""
-
-    rotated = rotate_bound(image, 0 - angle)
-    roi = cv2.cvtColor(rotated, cv2.COLOR_BGR2RGB)
-    return pyzbar.decode(roi)
-
-
 def decode_image(img_path: str, debug: bool = False) -> bool:
-    img = cv2.imread(img_path)
-    if img is None:
-        print(f"Failed to read image: {img_path}")
+    if not os.path.isfile(img_path):
+        print(f"文件不存在: {img_path}")
         return False
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    angle = barcode_angle(gray)
+    reader = zxing.BarCodeReader()
+    # try_harder=True 可在弱信号时多尝试几次
+    result = reader.decode(img_path, try_harder=True)
+
     if debug:
-        print(f"Estimated angle: {angle:.2f} degrees")
+        print("reader:", reader)
+        print("result object:", result)
 
-    decoded = bar(img, angle)
-    if not decoded:
-        print("No codes found.")
+    if result is None:
+        print("未识别到条码/二维码。")
         return False
 
-    for obj in decoded:
-        try:
-            text = obj.data.decode("utf-8", errors="ignore")
-        except Exception:
-            text = "<decode error>"
-        print(f"Type={obj.type} | Data={text} | Rect={obj.rect}")
+    print(f"Format={getattr(result, 'format', None)} | Type={getattr(result, 'type', None)}")
+    print(f"Parsed={getattr(result, 'parsed', None)}")
+    print(f"Raw={getattr(result, 'raw', None)}")
     return True
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Decode a single image by estimating barcode orientation."
-    )
-    parser.add_argument("--path", default=IMAGE_PATH, help="Image path (default: IMAGE_PATH in file)")
-    parser.add_argument("--debug", action="store_true", help="Print estimated angle")
+    parser = argparse.ArgumentParser(description="Decode image using zxing (no preprocessing).")
+    parser.add_argument("--path", default=IMAGE_PATH, help="图片路径（默认: 文件内的 IMAGE_PATH）")
+    parser.add_argument("--debug", action="store_true", help="打印调试信息")
     args = parser.parse_args()
 
     ok = decode_image(args.path, debug=args.debug)
