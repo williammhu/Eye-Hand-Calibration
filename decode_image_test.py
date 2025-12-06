@@ -7,11 +7,10 @@
 import argparse
 import os
 import sys
-
 import zxing
 
 # 默认测试图片路径，可用 CLI 参数覆盖
-IMAGE_PATH = r"D:\Eye-Hand-Calibration\1.png"
+IMAGE_PATH = r"D:\Eye-Hand-Calibration\da3ea9b2b4efbf4d93a823fb31ebc9de.png"
 
 
 def decode_image(img_path: str, debug: bool = False) -> bool:

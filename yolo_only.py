@@ -1,5 +1,5 @@
 ﻿"""
-Quick YOLOv8 inference + pyzbar decode (no robot, no hand-eye).
+Quick YOLOv8 inference + ZXing decode (no robot, no hand-eye).
 
 Usage examples
 --------------
@@ -8,66 +8,56 @@ Usage examples
 
 2) Image or video file:
    python yolo_only.py --weights best.pt --source path/to/file.mp4 --decode
-python yolo_only.py --decode
+
 Press q to quit the display window.
 """
 
 import argparse
+import os
+import tempfile
 import time
 from pathlib import Path
 
 import cv2
 from ultralytics import YOLO
-from pyzbar import pyzbar
+import zxing
+
+# Keep a single reader to avoid repeated init cost.
+ZXING_READER = zxing.BarCodeReader()
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="YOLOv8 quick visualizer with optional pyzbar decode")
+    p = argparse.ArgumentParser(description="YOLOv8 quick visualizer with optional ZXing decode")
     p.add_argument("--weights", type=str, default=r"D:\yolo\runs\detect\train\weights\best.pt", help="Path to YOLO weights")
     p.add_argument("--source", type=str, default="0", help="Camera index or image/video path")
     p.add_argument("--conf", type=float, default=0.5, help="Confidence threshold")
     p.add_argument("--imgsz", type=int, default=640, help="Inference size")
-    p.add_argument("--decode", action="store_true", help="Decode barcode/QR using pyzbar and print text")
-    p.add_argument(
-        "--allow-pdf417",
-        action="store_true",
-        help="Include PDF417 symbology in decoding (disabled by default to avoid zbar assertion warnings)",
-    )
+    p.add_argument("--decode", action="store_true", help="Decode barcode/QR using ZXing and print text")
     return p.parse_args()
 
 
-def decode_with_pyzbar(frame, allow_pdf417=False):
+def decode_with_zxing(frame):
     """
-    Decode one frame via pyzbar. Returns parsed text or None.
-    PDF417 decoding is disabled by default to avoid zbar assertion warnings on some frames.
+    Decode one frame/crop via ZXing.
+    ZXing Python binding currently expects a file path, so we temp-save the crop as PNG.
+    Returns parsed text or None.
     """
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    # Limit symbologies to avoid zbar's PDF417 assertion; user can re-enable via flag.
-    symbols = None
-    if not allow_pdf417:
-        symbols = [
-            pyzbar.ZBarSymbol.CODE128,
-            pyzbar.ZBarSymbol.CODE39,
-            pyzbar.ZBarSymbol.EAN13,
-            pyzbar.ZBarSymbol.EAN8,
-            pyzbar.ZBarSymbol.UPCA,
-            pyzbar.ZBarSymbol.UPCE,
-            pyzbar.ZBarSymbol.I25,
-            pyzbar.ZBarSymbol.DATABAR,
-            pyzbar.ZBarSymbol.DATABAR_EXP,
-            pyzbar.ZBarSymbol.CODABAR,
-            pyzbar.ZBarSymbol.QRCODE,
-        ]
+    ok, buf = cv2.imencode(".png", frame)
+    if not ok:
+        return None
 
-    decoded = pyzbar.decode(gray, symbols=symbols)
-    for obj in decoded:
-        try:
-            text = obj.data.decode("utf-8", errors="ignore")
-        except Exception:
-            continue
-        if text:
-            return text
-    return None
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+            tmp.write(buf.tobytes())
+            tmp_path = tmp.name
+        result = ZXING_READER.decode(tmp_path, try_harder=True)
+        if result is None:
+            return None
+        return getattr(result, "parsed", None) or getattr(result, "raw", None)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 def main():
@@ -75,7 +65,7 @@ def main():
     model = YOLO(args.weights)
 
     if args.decode:
-        print("[PYZBAR] decoder enabled")
+        print("[ZXING] decoder enabled")
 
     # Decide capture source
     is_cam = args.source.isdigit()
@@ -134,9 +124,9 @@ def main():
                     if x2 <= x1 or y2 <= y1:
                         continue
                     crop = frame[y1:y2, x1:x2]
-                    decoded_text = decode_with_pyzbar(crop, allow_pdf417=args.allow_pdf417)
+                    decoded_text = decode_with_zxing(crop)
                     if decoded_text:
-                        print(f"[PYZBAR] {decoded_text}")
+                        print(f"[ZXING] {decoded_text}")
                         cv2.putText(
                             vis,
                             decoded_text[:60],
