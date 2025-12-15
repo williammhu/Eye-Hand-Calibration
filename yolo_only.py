@@ -29,7 +29,7 @@ ZXING_READER = zxing.BarCodeReader()
 def parse_args():
     p = argparse.ArgumentParser(description="YOLOv8 quick visualizer with optional ZXing decode")
     p.add_argument("--weights", type=str, default=r"D:\yolo\runs\detect\train\weights\best.pt", help="Path to YOLO weights")
-    p.add_argument("--source", type=str, default="1", help="Camera index or image/video path")
+    p.add_argument("--source", type=str, default="0", help="Camera index or image/video path")
     p.add_argument("--conf", type=float, default=0.5, help="Confidence threshold")
     p.add_argument("--imgsz", type=int, default=640, help="Inference size")
     p.add_argument("--cam-width", type=int, default=1280, help="Requested camera width (pixels)")

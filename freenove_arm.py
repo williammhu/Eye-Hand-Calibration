@@ -21,10 +21,11 @@ from command import Command
 
 @dataclass
 class FreenoveArmClient:
-    host: str = "127.0.0.1"
+    host: str = "10.149.65.232"
     port: int = 5000
-    dry_run: bool = True
+    dry_run: bool = False
     auto_enable: bool = True
+    verbose: bool = False
 
     _client: Optional[Client] = field(default=None, init=False, repr=False)
     _cmd: Command = field(default_factory=Command, init=False, repr=False)
@@ -62,8 +63,10 @@ class FreenoveArmClient:
     def _send(self, text: str) -> None:
         """Send a raw command line, adding CRLF to match the app behaviour."""
 
+        if self.verbose or self.dry_run:
+            prefix = "[dry-run]" if self.dry_run else "[send]"
+            print(f"{prefix} {text}")
         if self.dry_run:
-            print(f"[dry-run] {text}")
             return
 
         if self._client is None or not self._client.connect_flag:
@@ -73,7 +76,10 @@ class FreenoveArmClient:
         self._client.send_messages(text + "\r\n")
 
     def enable_motors(self, enable: bool = True) -> None:
-        """Mirror the UI \"Load Motor\" toggle (S8 E0 to enable, S8 E1 to relax)."""
+        """
+        Mirror the UI \"Load Motor\" toggle.
+        From the stock UI (see freenove_source_code/main.py): S8 E0 = load/enable, S8 E1 = relax.
+        """
 
         state = "0" if enable else "1"
         cmd = f"{self._cmd.CUSTOM_ACTION}8 {self._cmd.ARM_ENABLE}{state}"

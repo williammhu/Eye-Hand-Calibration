@@ -1,5 +1,6 @@
 import socket
-import messageQueue
+from freenove_source_code import messageQueue
+
 
 class Client:
     def __init__(self):

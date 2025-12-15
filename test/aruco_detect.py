@@ -19,7 +19,7 @@ ARUCO_DICT = {"DICT_4X4_50": cv2.aruco.DICT_4X4_50, "DICT_4X4_100": cv2.aruco.DI
               "DICT_APRILTAG_36h10": cv2.aruco.DICT_APRILTAG_36h10,
               "DICT_APRILTAG_36h11": cv2.aruco.DICT_APRILTAG_36h11}
 
-image = cv2.imread('test_aruco5-5-50.jpg')
+image = cv2.imread('D:\Eye-Hand-Calibration\img.png')
 image = cv2.resize(image, (640, 400))
 corners = []
 ids = []
