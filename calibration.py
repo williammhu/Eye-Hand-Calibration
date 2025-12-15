@@ -18,39 +18,38 @@ from __future__ import annotations
 import argparse
 import os
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
-import cv2.aruco as aruco
 import numpy as np
 
 from freenove_arm import FreenoveArmClient
 
-# Supported ArUco/AprilTag dictionaries. The names mirror OpenCV constants so
-# that a CLI flag can choose one, or "auto" can sweep them until one matches.
-ARUCO_DICT_NAMES = {
-    "DICT_4X4_50": aruco.DICT_4X4_50,
-    "DICT_4X4_100": aruco.DICT_4X4_100,
-    "DICT_4X4_250": aruco.DICT_4X4_250,
-    "DICT_4X4_1000": aruco.DICT_4X4_1000,
-    "DICT_5X5_50": aruco.DICT_5X5_50,
-    "DICT_5X5_100": aruco.DICT_5X5_100,
-    "DICT_5X5_250": aruco.DICT_5X5_250,
-    "DICT_5X5_1000": aruco.DICT_5X5_1000,
-    "DICT_6X6_50": aruco.DICT_6X6_50,
-    "DICT_6X6_100": aruco.DICT_6X6_100,
-    "DICT_6X6_250": aruco.DICT_6X6_250,
-    "DICT_6X6_1000": aruco.DICT_6X6_1000,
-    "DICT_7X7_50": aruco.DICT_7X7_50,
-    "DICT_7X7_100": aruco.DICT_7X7_100,
-    "DICT_7X7_250": aruco.DICT_7X7_250,
-    "DICT_7X7_1000": aruco.DICT_7X7_1000,
-    "DICT_ARUCO_ORIGINAL": aruco.DICT_ARUCO_ORIGINAL,
-    "DICT_APRILTAG_16h5": aruco.DICT_APRILTAG_16h5,
-    "DICT_APRILTAG_25h9": aruco.DICT_APRILTAG_25h9,
-    "DICT_APRILTAG_36h10": aruco.DICT_APRILTAG_36h10,
-    "DICT_APRILTAG_36h11": aruco.DICT_APRILTAG_36h11,
-}
+# Supported ArUco/AprilTag dictionaries by name.
+SUPPORTED_ARUCO_NAMES = [
+    "DICT_4X4_50",
+    "DICT_4X4_100",
+    "DICT_4X4_250",
+    "DICT_4X4_1000",
+    "DICT_5X5_50",
+    "DICT_5X5_100",
+    "DICT_5X5_250",
+    "DICT_5X5_1000",
+    "DICT_6X6_50",
+    "DICT_6X6_100",
+    "DICT_6X6_250",
+    "DICT_6X6_1000",
+    "DICT_7X7_50",
+    "DICT_7X7_100",
+    "DICT_7X7_250",
+    "DICT_7X7_1000",
+    "DICT_ARUCO_ORIGINAL",
+    "DICT_APRILTAG_16h5",
+    "DICT_APRILTAG_25h9",
+    "DICT_APRILTAG_36h10",
+    "DICT_APRILTAG_36h11",
+]
+ARUCO_DICT_NAMES: Dict[str, int] = {name: getattr(cv2.aruco, name) for name in SUPPORTED_ARUCO_NAMES}
 
 DEFAULT_ARUCO_NAME = "DICT_5X5_100"
 MARKER_LENGTH_METERS = 0.02
@@ -91,36 +90,41 @@ class HomographyResult:
 
 class PlaneCalibrator:
     def __init__(self, camera_cfg: CameraConfig, dictionary_name: str = DEFAULT_ARUCO_NAME):
-        if dictionary_name != "auto" and dictionary_name not in ARUCO_DICT_NAMES:
+        if dictionary_name != "auto" and dictionary_name not in SUPPORTED_ARUCO_NAMES:
             raise ValueError(f"Unknown dictionary {dictionary_name}")
 
+        self.cv2 = cv2
+        self.aruco = cv2.aruco
+        self.aruco_dicts = ARUCO_DICT_NAMES
+        self.np = np
+
         self.camera_cfg = camera_cfg
-        self.parameters = aruco.DetectorParameters()
+        self.parameters = self.aruco.DetectorParameters()
         # Prepare one or many detectors depending on the CLI flag.
-        target_names = list(ARUCO_DICT_NAMES) if dictionary_name == "auto" else [dictionary_name]
-        self.detectors: List[Tuple[str, aruco.Dictionary, aruco.ArucoDetector]] = []
+        target_names = SUPPORTED_ARUCO_NAMES if dictionary_name == "auto" else [dictionary_name]
+        self.detectors: List[Tuple[str, object, object]] = []
         for name in target_names:
-            d = aruco.getPredefinedDictionary(ARUCO_DICT_NAMES[name])
-            self.detectors.append((name, d, aruco.ArucoDetector(d, self.parameters)))
+            d = self.aruco.getPredefinedDictionary(self.aruco_dicts[name])
+            self.detectors.append((name, d, self.aruco.ArucoDetector(d, self.parameters)))
         self.active_dict: Optional[str] = None
         self.camera = self._open_camera(camera_cfg)
 
-    def _open_camera(self, cfg: CameraConfig) -> cv2.VideoCapture:
+    def _open_camera(self, cfg: CameraConfig) -> object:
         # Accept both numeric indexes and string paths/URLs (phone cams, rtsp, etc.)
         src: int | str = int(cfg.source) if str(cfg.source).isdigit() else cfg.source
-        cap = cv2.VideoCapture(src)
+        cap = self.cv2.VideoCapture(src)
         if str(cfg.source).isdigit():
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, cfg.width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg.height)
-            cap.set(cv2.CAP_PROP_FPS, cfg.fps)
+            cap.set(self.cv2.CAP_PROP_FRAME_WIDTH, cfg.width)
+            cap.set(self.cv2.CAP_PROP_FRAME_HEIGHT, cfg.height)
+            cap.set(self.cv2.CAP_PROP_FPS, cfg.fps)
 
         if not cap.isOpened():
             raise RuntimeError(f"Could not open camera source {cfg.source}")
 
         # Log the actual negotiated resolution/FPS to help diagnose virtual cams
-        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        actual_fps = cap.get(cv2.CAP_PROP_FPS)
+        actual_w = int(cap.get(self.cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(cap.get(self.cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = cap.get(self.cv2.CAP_PROP_FPS)
         print(f"[CAM] {cfg.source} -> {actual_w}x{actual_h}@{actual_fps:.1f}")
         return cap
 
@@ -131,7 +135,7 @@ class PlaneCalibrator:
         return frame
 
     def detect_marker(self, frame: np.ndarray) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = self.cv2.cvtColor(frame, self.cv2.COLOR_BGR2GRAY)
 
         corners = ids = None
         rejected = None
@@ -144,22 +148,32 @@ class PlaneCalibrator:
         if ids is None or len(ids) == 0:
             return frame, None
 
-        aruco.drawDetectedMarkers(frame, corners, ids)
+        self.aruco.drawDetectedMarkers(frame, corners, ids)
         focal_length = max(self.camera_cfg.width, self.camera_cfg.height)
-        camera_matrix = np.array(
+        camera_matrix = self.np.array(
             [[focal_length, 0, self.camera_cfg.width / 2], [0, focal_length, self.camera_cfg.height / 2], [0, 0, 1]],
-            dtype=np.float32,
+            dtype=self.np.float32,
         )
-        dist_coeffs = np.zeros((1, 5))
-        rvecs, tvecs, _ = aruco.estimatePoseSingleMarkers(corners, MARKER_LENGTH_METERS, camera_matrix, dist_coeffs)
+        dist_coeffs = self.np.zeros((1, 5))
+        rvecs, tvecs, _ = self.aruco.estimatePoseSingleMarkers(
+            corners, MARKER_LENGTH_METERS, camera_matrix, dist_coeffs
+        )
         for rvec, tvec in zip(rvecs, tvecs):
-            cv2.drawFrameAxes(frame, camera_matrix, dist_coeffs, rvec, tvec, MARKER_LENGTH_METERS)
+            self.cv2.drawFrameAxes(frame, camera_matrix, dist_coeffs, rvec, tvec, MARKER_LENGTH_METERS)
 
         corner = corners[0][0]
         center = corner.mean(axis=0)
-        cv2.circle(frame, tuple(center.astype(int)), 5, (0, 0, 255), -1)
+        self.cv2.circle(frame, tuple(center.astype(int)), 5, (0, 0, 255), -1)
         label = f"{self.active_dict or 'Aruco'} center"
-        cv2.putText(frame, label, (int(center[0]) + 5, int(center[1]) - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        self.cv2.putText(
+            frame,
+            label,
+            (int(center[0]) + 5, int(center[1]) - 5),
+            self.cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 0),
+            2,
+        )
         return frame, center
 
     def collect_correspondences(
@@ -169,6 +183,7 @@ class PlaneCalibrator:
         settle_time: float = 1.0,
         step_mode: bool = False,
     ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+        np_module = self.np
         image_points: List[np.ndarray] = []
         robot_xy_points: List[np.ndarray] = []
 
@@ -176,19 +191,20 @@ class PlaneCalibrator:
             if step_mode:
                 input(f"[{idx + 1}/{len(robot_points)}] Press Enter to move to ({x}, {y}, {z}) ...")
             print(f"Moving to calibration point {idx + 1}/{len(robot_points)}: ({x}, {y}, {z})")
-            robot.move_to(x, y, z)
+            dwell_ms = int(settle_time * 1000)
+            robot.move_to(x, y, z, dwell_ms=dwell_ms)
             robot.wait(settle_time)
 
             frame = self.read_frame()
             vis, center = self.detect_marker(frame)
-            cv2.imshow("calibration", vis)
-            cv2.waitKey(1)
+            self.cv2.imshow("calibration", vis)
+            self.cv2.waitKey(1)
 
             if center is None:
                 raise RuntimeError("No ArUco marker detected during calibration. Make sure it is visible to the camera.")
 
             image_points.append(center)
-            robot_xy_points.append(np.array([x, y], dtype=np.float32))
+            robot_xy_points.append(np_module.array([x, y], dtype=np_module.float32))
             print(f"Captured image point {center} for robot XY ({x}, {y})")
 
         return image_points, robot_xy_points
@@ -230,14 +246,16 @@ class PlaneCalibrator:
                 x, y = self.pixel_to_robot(center, homography.homography)
                 status = f"Target -> X: {x:.1f} mm, Y: {y:.1f} mm, Z: {z_height:.1f} mm"
                 robot.move_to(x, y, z_height, speed=move_speed)
-                cv2.circle(vis, (int(center[0]), int(center[1])), 10, (255, 0, 0), 2)
-            cv2.putText(vis, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            cv2.imshow("follow", vis)
-            key = cv2.waitKey(1) & 0xFF
+                self.cv2.circle(vis, (int(center[0]), int(center[1])), 10, (255, 0, 0), 2)
+            self.cv2.putText(
+                vis, status, (10, 30), self.cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2
+            )
+            self.cv2.imshow("follow", vis)
+            key = self.cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
         self.camera.release()
-        cv2.destroyAllWindows()
+        self.cv2.destroyAllWindows()
 
 
 def default_calibration_points(z_height: float) -> List[Tuple[float, float, float]]:
@@ -275,12 +293,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--speed", type=int, default=50, help="Robot move speed hint (not all firmware uses this)")
     parser.add_argument("--settle", type=float, default=1.0, help="Delay after each move during calibration (s)")
     parser.add_argument("--step", action="store_true", help="Pause for Enter before each calibration move")
+    parser.add_argument("--home-first", action="store_true", help="Send the S10 home command before running")
+    parser.add_argument("--ground-clearance", type=float, help="Send S3 to set the ground clearance height (mm)")
     parser.add_argument("--verbose", action="store_true", help="Print every command sent to the arm")
     parser.add_argument(
         "--aruco-dict",
         type=str,
         default=DEFAULT_ARUCO_NAME,
-        choices=["auto"] + list(ARUCO_DICT_NAMES),
+        choices=["auto"] + SUPPORTED_ARUCO_NAMES,
         help='Marker dictionary name, or "auto" to scan all supported ArUco/AprilTag sets.',
     )
     return parser.parse_args()
@@ -298,6 +318,14 @@ def main() -> None:
         auto_enable=not args.skip_enable,
         verbose=args.verbose,
     ) as arm:
+        if args.home_first:
+            arm.return_to_sensor_point()
+            arm.wait(args.settle)
+
+        if args.ground_clearance is not None:
+            arm.set_ground_clearance(args.ground_clearance)
+            arm.wait(0.1)
+
         if args.mode == "calibrate":
             robot_points = default_calibration_points(args.z_height)
             img_pts, rob_pts = calibrator.collect_correspondences(
