@@ -85,14 +85,14 @@ class FreenoveArmClient:
         cmd = f"{self._cmd.CUSTOM_ACTION}8 {self._cmd.ARM_ENABLE}{state}"
         self._send(cmd)
 
-    def move_to(self, x: float, y: float, z: float, speed: int | None = None) -> None:
+    def move_to(self, x: float, y: float, z: float, speed: int | None = None, dwell_ms: int | None = None) -> None:
         """
         Absolute move in millimetres.
 
-        The native protocol encodes position as ``G0 X.. Y.. Z..``.  A feed
-        rate/speed parameter is not currently supported by the firmware; the
-        optional ``speed`` argument is accepted for API compatibility and
-        ignored if provided.
+        The native protocol encodes position as ``G0 X.. Y.. Z..``.  The official
+        instructions pair this with ``G4 T<ms>`` to pause after the move; pass
+        ``dwell_ms`` to emit the pause directly instead of sleeping on the
+        client.
         """
 
         cmd = (
@@ -102,6 +102,55 @@ class FreenoveArmClient:
             f"{self._cmd.AXIS_Z_ACTION}{z:.1f}"
         )
         self._send(cmd)
+        if dwell_ms is not None:
+            self._send(f"{self._cmd.MOVE_ACTION}4 {self._cmd.DELAY_T_ACTION}{dwell_ms}")
 
     def wait(self, seconds: float) -> None:
         time.sleep(seconds)
+
+    # Utility commands mirroring the official control table ----------------
+    def return_to_sensor_point(self, index: int = 0) -> None:
+        """Return the arm to its magnetic/sensor origin (``S10 F{index}``)."""
+
+        self._send(f"{self._cmd.CUSTOM_ACTION}10 {self._cmd.ARM_SENSOR_POINT}{index}")
+
+    def set_home(self, x: float, y: float, z: float) -> None:
+        """Store a home location with ``S5 X.. Y.. Z..``."""
+
+        cmd = (
+            f"{self._cmd.CUSTOM_ACTION}5 "
+            f"{self._cmd.AXIS_X_ACTION}{x:.1f} "
+            f"{self._cmd.AXIS_Y_ACTION}{y:.1f} "
+            f"{self._cmd.AXIS_Z_ACTION}{z:.1f}"
+        )
+        self._send(cmd)
+
+    def set_ground_clearance(self, height_mm: float) -> None:
+        """Set the ground clearance/padding height (``S3 O..``)."""
+
+        self._send(f"{self._cmd.CUSTOM_ACTION}3 {self._cmd.GROUND_HEIGHT}{height_mm:.1f}")
+
+    def set_clamp_length(self, length_mm: float) -> None:
+        """Configure gripper length (``S4 L..``)."""
+
+        self._send(f"{self._cmd.CUSTOM_ACTION}4 {self._cmd.CLAMP_LENGTH}{length_mm:.1f}")
+
+    def set_frequency(self, frequency_hz: int) -> None:
+        """Adjust pulse frequency with ``S6 Q..``."""
+
+        self._send(f"{self._cmd.CUSTOM_ACTION}6 {self._cmd.ARM_FREQUENCY}{frequency_hz}")
+
+    def set_microstep(self, resolution: int) -> None:
+        """Configure microstep resolution via ``S7 W..``."""
+
+        self._send(f"{self._cmd.CUSTOM_ACTION}7 {self._cmd.ARM_MSX}{resolution}")
+
+    def beep(self, frequency_hz: int) -> None:
+        """Play a buzzer tone (``S2 D..``)."""
+
+        self._send(f"{self._cmd.CUSTOM_ACTION}2 {self._cmd.BUZZER_ACTION}{frequency_hz}")
+
+    def stop_buzzer(self) -> None:
+        """Silence the buzzer (``S2 D0``)."""
+
+        self._send(f"{self._cmd.CUSTOM_ACTION}2 {self._cmd.BUZZER_ACTION}0")
