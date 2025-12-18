@@ -1,5 +1,5 @@
 """
-Minimal camera sanity-check using the same open logic as calibration.py.
+Minimal camera sanity-check using the same open logic as Hand_Eye_Calibration.py.
 Shows the live feed; press 'q' to exit.
 """
 

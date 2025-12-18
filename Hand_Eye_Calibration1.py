@@ -9,8 +9,8 @@ to the gripper.
 cd Freenove_Robot_Arm_Kit_for_Raspberry_Pi/Server/Code
 sudo python main.py
 cmd 输入： ping -4 raspberrypi.local
-电脑测试：python calibration.py --mode calibrate --host 127.0.0.1 --port 5000 --dry-run
-机械臂运行： python calibration.py --mode calibrate --host 10.149.65.232 --port 5000 --source 0
+电脑测试：python Hand_Eye_Calibration.py --mode calibrate --host 127.0.0.1 --port 5000 --dry-run
+机械臂运行： python Hand_Eye_Calibration1.py --mode calibrate --source 0 --settle 1.0 --step
 """
 
 from __future__ import annotations
@@ -53,6 +53,26 @@ ARUCO_DICT_NAMES: Dict[str, int] = {name: getattr(cv2.aruco, name) for name in S
 
 DEFAULT_ARUCO_NAME = "DICT_5X5_100"
 MARKER_LENGTH_METERS = 0.02
+
+
+# Camera open helper copied verbatim from cam_test.py
+def open_camera(src_str: str, w: int, h: int, fps: int) -> cv2.VideoCapture:
+    # Accept numeric index or string path/URL
+    src = int(src_str) if src_str.isdigit() else src_str
+    cap = cv2.VideoCapture(src)
+    if src_str.isdigit():
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        cap.set(cv2.CAP_PROP_FPS, fps)
+
+    if not cap.isOpened():
+        raise SystemExit(f"Could not open camera source {src_str}")
+
+    actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    actual_fps = cap.get(cv2.CAP_PROP_FPS)
+    print(f"[CAM] {src_str} -> {actual_w}x{actual_h}@{actual_fps:.1f}")
+    return cap
 
 
 @dataclass
@@ -107,26 +127,8 @@ class PlaneCalibrator:
             d = self.aruco.getPredefinedDictionary(self.aruco_dicts[name])
             self.detectors.append((name, d, self.aruco.ArucoDetector(d, self.parameters)))
         self.active_dict: Optional[str] = None
-        self.camera = self._open_camera(camera_cfg)
-
-    def _open_camera(self, cfg: CameraConfig) -> object:
-        # Accept both numeric indexes and string paths/URLs (phone cams, rtsp, etc.)
-        src: int | str = int(cfg.source) if str(cfg.source).isdigit() else cfg.source
-        cap = self.cv2.VideoCapture(src)
-        if str(cfg.source).isdigit():
-            cap.set(self.cv2.CAP_PROP_FRAME_WIDTH, cfg.width)
-            cap.set(self.cv2.CAP_PROP_FRAME_HEIGHT, cfg.height)
-            cap.set(self.cv2.CAP_PROP_FPS, cfg.fps)
-
-        if not cap.isOpened():
-            raise RuntimeError(f"Could not open camera source {cfg.source}")
-
-        # Log the actual negotiated resolution/FPS to help diagnose virtual cams
-        actual_w = int(cap.get(self.cv2.CAP_PROP_FRAME_WIDTH))
-        actual_h = int(cap.get(self.cv2.CAP_PROP_FRAME_HEIGHT))
-        actual_fps = cap.get(self.cv2.CAP_PROP_FPS)
-        print(f"[CAM] {cfg.source} -> {actual_w}x{actual_h}@{actual_fps:.1f}")
-        return cap
+        # Use the exact same camera open routine as cam_test.py
+        self.camera = open_camera(camera_cfg.source, camera_cfg.width, camera_cfg.height, camera_cfg.fps)
 
     def read_frame(self) -> np.ndarray:
         ok, frame = self.camera.read()
@@ -260,7 +262,7 @@ class PlaneCalibrator:
 
 def default_calibration_points(z_height: float) -> List[Tuple[float, float, float]]:
     grid = [
-        (80, 120, z_height),
+        (100, 0, z_height),
         (80, 200, z_height),
         (80, 280, z_height),
         (160, 120, z_height),
@@ -282,10 +284,10 @@ def parse_args() -> argparse.Namespace:
         default="0",
         help="Camera source (index like '0', RTSP/HTTP URL, or virtual cam path).",
     )
-    parser.add_argument("--cam-width", type=int, default=1280, help="Requested camera width (pixels)")
-    parser.add_argument("--cam-height", type=int, default=720, help="Requested camera height (pixels)")
+    parser.add_argument("--cam-width", type=int, default=1960, help="Requested camera width (pixels)")
+    parser.add_argument("--cam-height", type=int, default=1080, help="Requested camera height (pixels)")
     parser.add_argument("--cam-fps", type=int, default=30, help="Requested camera FPS")
-    parser.add_argument("--z-height", type=float, default=70.0, help="Fixed Z height used for calibration and following (mm)")
+    parser.add_argument("--z-height", type=float, default=80.0, help="Fixed Z height used for calibration and following (mm)")
     parser.add_argument("--host", type=str, default="10.149.65.232", help="Robot IP address")
     parser.add_argument("--port", type=int, default=5000, help="Robot TCP port (matches client.py default)")
     parser.add_argument("--dry-run", action="store_true", help="Print robot commands instead of sending them")
@@ -293,7 +295,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--speed", type=int, default=50, help="Robot move speed hint (not all firmware uses this)")
     parser.add_argument("--settle", type=float, default=1.0, help="Delay after each move during calibration (s)")
     parser.add_argument("--step", action="store_true", help="Pause for Enter before each calibration move")
-    parser.add_argument("--home-first", action="store_true", help="Send the S10 home command before running")
+    parser.add_argument(
+        "--home-first",
+        dest="home_first",
+        action="store_true",
+        default=True,
+        help="Send S10 F1 right after enabling motors (default: on; use --no-home-first to skip)",
+    )
+    parser.add_argument(
+        "--no-home-first",
+        dest="home_first",
+        action="store_false",
+        help="Skip the S10 F1 homing step",
+    )
     parser.add_argument("--ground-clearance", type=float, help="Send S3 to set the ground clearance height (mm)")
     parser.add_argument("--verbose", action="store_true", help="Print every command sent to the arm")
     parser.add_argument(
@@ -318,9 +332,10 @@ def main() -> None:
         auto_enable=not args.skip_enable,
         verbose=args.verbose,
     ) as arm:
+        # Mirror quick_move / official UI: home immediately after enable.
         if args.home_first:
-            arm.return_to_sensor_point()
-            arm.wait(args.settle)
+            arm.return_to_sensor_point(1)
+            arm.wait(0.5)
 
         if args.ground_clearance is not None:
             arm.set_ground_clearance(args.ground_clearance)

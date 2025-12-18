@@ -3,7 +3,7 @@ YOLOv8 + hand-eye calibration (planar homography) pick-and-place demo.
 
 Workflow
 --------
-1) Run calibration.py --mode calibrate (or calibration_test.py) to generate
+1) Run Hand_Eye_Calibration.py --mode calibrate (or calibration_test.py) to generate
    save_parms/homography.npy / homography_inv.npy.
 2) Place objects on the same plane used for calibration.
 3) Start this script. It will:
@@ -28,7 +28,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-from calibration import HomographyResult
+from Hand_Eye_Calibration import HomographyResult
 from freenove_arm import FreenoveArmClient
 
 
@@ -113,7 +113,7 @@ def detection_loop(args: argparse.Namespace) -> None:
     except FileNotFoundError:
         raise SystemExit(
             f"Homography files not found in '{args.parms_dir}'. "
-            "Please run calibration.py --mode calibrate first."
+            "Please run Hand_Eye_Calibration.py --mode calibrate first."
         )
 
     model = YOLO(args.weights)

@@ -2,10 +2,17 @@
 Minimal single-move tester for the Freenove robot arm.
 
 Usage example (real move):
-    python quick_move.py --host 10.149.65.232 --x 160 --y 200 --z 60 --verbose
+ python quick_move.py --host 10.149.65.232 --interactive --verbose
 
 Dry run (just print commands):
     python quick_move.py --dry-run --verbose
+    100 200 90
+     0 200 90
+    -100 200 90
+     0 150 90
+     0 250 90
+
+
 """
 
 from __future__ import annotations
@@ -20,11 +27,16 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Send one move command to the Freenove arm (mirrors official UI flow).")
     p.add_argument("--host", type=str, default="10.149.65.232", help="Robot IP address")
     p.add_argument("--port", type=int, default=5000, help="Robot TCP port")
-    p.add_argument("--x", type=float, default=160.0, help="Target X (mm)")
-    p.add_argument("--y", type=float, default=200.0, help="Target Y (mm)")
-    p.add_argument("--z", type=float, default=70.0, help="Target Z (mm)")
+    p.add_argument("--x", type=float, default=-170.0, help="Target X (mm)")
+    p.add_argument("--y", type=float, default=160.0, help="Target Y (mm)")
+    p.add_argument("--z", type=float, default=100.0, help="Target Z (mm)")
     p.add_argument("--dwell-ms", type=int, help="Optional G4 pause (ms) after the move")
     p.add_argument("--settle", type=float, default=1.0, help="Sleep time after move (seconds)")
+    p.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Keep the motors enabled and accept repeated moves until you quit",
+    )
     p.add_argument(
         "--home-first",
         dest="home_first",
@@ -58,9 +70,39 @@ def main() -> None:
             arm.return_to_sensor_point(1)
             arm.wait(0.5)
 
-        print(f"Moving to X={args.x:.1f}, Y={args.y:.1f}, Z={args.z:.1f}")
-        arm.move_to(args.x, args.y, args.z, dwell_ms=args.dwell_ms)
-        arm.wait(args.settle)
+        if args.interactive:
+            print("Interactive mode: enter 'x y z [dwell_ms]' per line, or 'q' to quit.")
+            while True:
+                try:
+                    line = input("> ").strip()
+                except (KeyboardInterrupt, EOFError):
+                    print("\nExiting interactive mode.")
+                    break
+
+                if not line:
+                    continue
+                if line.lower() in {"q", "quit", "exit"}:
+                    break
+
+                parts = line.split()
+                if len(parts) < 3:
+                    print("Please enter at least x y z (mm). Optional fourth value is dwell_ms.")
+                    continue
+
+                try:
+                    x, y, z = map(float, parts[:3])
+                    dwell_ms = int(parts[3]) if len(parts) >= 4 else args.dwell_ms
+                except ValueError:
+                    print("Could not parse numbers; try again.")
+                    continue
+
+                print(f"Moving to X={x:.1f}, Y={y:.1f}, Z={z:.1f}")
+                arm.move_to(x, y, z, dwell_ms=dwell_ms)
+                arm.wait(args.settle)
+        else:
+            print(f"Moving to X={args.x:.1f}, Y={args.y:.1f}, Z={args.z:.1f}")
+            arm.move_to(args.x, args.y, args.z, dwell_ms=args.dwell_ms)
+            arm.wait(args.settle)
 
     print("Done.")
 
