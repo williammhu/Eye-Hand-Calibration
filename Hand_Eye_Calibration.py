@@ -234,12 +234,9 @@ class PlaneCalibrator:
 def default_calibration_points(z_height: float) -> List[Tuple[float, float, float]]:
     grid = [
         (0, 200, z_height),
-        (0, 250, z_height),
         (100, 250, z_height),
         (100, 200, z_height),
-        (100, 150, z_height),
         (0, 150, z_height),
-        (-100, 150, z_height),
         (-100, 200, z_height),
         (-100, 250, z_height),
     ]
@@ -255,7 +252,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Print robot commands instead of sending them")
     parser.add_argument("--skip-enable", action="store_true", help="Do not send the S8 motor enable command on connect")
     parser.add_argument("--speed", type=int, default=50, help="Robot move speed hint (not all firmware uses this)")
-    parser.add_argument("--settle", type=float, default=1.0, help="Delay after each move during calibration (s)")
+    parser.add_argument("--settle", type=float, default=5.0, help="Delay after each move during calibration (s)")
     parser.add_argument("--step", action="store_true", help="Pause for Enter before each calibration move")
     parser.add_argument(
         "--home-first",

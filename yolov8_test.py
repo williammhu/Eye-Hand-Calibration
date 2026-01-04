@@ -14,6 +14,7 @@ Workflow
 The detection loop stays in the main thread (so OpenCV windows work on Windows);
 robot motion runs in a background thread and processes one target at a time.
 Press q to quit.
+python yolov8_test.py --parms-dir save_parms
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ from __future__ import annotations
 import argparse
 import queue
 import threading
-import time
 from typing import Optional, Sequence, Set, Tuple
 
 import cv2
@@ -79,8 +79,20 @@ def robot_worker(args: argparse.Namespace, target_queue: "queue.Queue", busy_fla
             host=args.host,
             port=args.port,
             dry_run=args.dry_run,
-            auto_enable=not args.skip_enable,
+            # Always enable motors for the full run to keep power on as requested.
+            auto_enable=True,
         ) as arm:
+            if args.skip_enable:
+                print("[robot] --skip-enable ignored; motors are kept enabled.")
+            # Mirror quick_move/Hand_Eye_Calibration startup: home once and optionally set clearance.
+            if args.home_first:
+                arm.return_to_sensor_point(1)
+                arm.wait(0.5)
+            if args.ground_clearance is not None:
+                arm.set_ground_clearance(args.ground_clearance)
+                arm.wait(0.1)
+
+            calib_point = (args.calib_x, args.calib_y, args.calib_z)
             print("[robot] connected to arm")
             while True:
                 item = target_queue.get()
@@ -88,15 +100,13 @@ def robot_worker(args: argparse.Namespace, target_queue: "queue.Queue", busy_fla
                     break
 
                 x, y, z, cls_id = item
-                approach_z = z + args.approach
                 print(f"[robot] target ({x:.1f}, {y:.1f}, {z:.1f}) cls={cls_id}")
 
-                # Simple 3-step pick motion; adjust timings to your hardware.
-                arm.move_to(x, y, approach_z, speed=args.speed)
-                time.sleep(args.settle)
+                # Move to target, hold, then return to calibration point. Stay powered the whole time.
                 arm.move_to(x, y, z, speed=args.speed)
-                time.sleep(args.grasp_time)
-                arm.move_to(x, y, approach_z, speed=args.speed)
+                arm.wait(args.hold_time)
+                arm.move_to(*calib_point, speed=args.speed)
+                arm.wait(args.settle)
 
                 busy_flag.clear()
     except Exception as exc:  # pragma: no cover - hardware path
@@ -117,10 +127,8 @@ def detection_loop(args: argparse.Namespace) -> None:
         )
 
     model = YOLO(args.weights)
-    cap = cv2.VideoCapture(args.camera_id)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
-    cap.set(cv2.CAP_PROP_FPS, args.fps)
+    # Use the same DirectShow capture path as Hand_Eye_Calibration for Windows stability.
+    cap = cv2.VideoCapture(args.camera_id, cv2.CAP_DSHOW)
 
     if not cap.isOpened():
         raise SystemExit("Could not open camera")
@@ -128,6 +136,7 @@ def detection_loop(args: argparse.Namespace) -> None:
     allowed = set(args.classes) if args.classes else None
     target_queue: queue.Queue = queue.Queue(maxsize=1)
     busy_flag = threading.Event()
+    detection_triggered = False  # stop detection after first successful target
 
     robot_thread = threading.Thread(
         target=robot_worker,
@@ -136,7 +145,6 @@ def detection_loop(args: argparse.Namespace) -> None:
     )
     robot_thread.start()
 
-    last_sent = 0.0
     try:
         while True:
             ok, frame = cap.read()
@@ -144,11 +152,33 @@ def detection_loop(args: argparse.Namespace) -> None:
                 print("[vision] failed to read frame")
                 break
 
+            if busy_flag.is_set():
+                cv2.putText(frame, "Robot moving...", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                cv2.imshow("yolo + hand-eye", frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
+                continue
+
+            # Once a target has been sent and the robot finished, stop detection.
+            if detection_triggered and not busy_flag.is_set():
+                cv2.putText(
+                    frame,
+                    "Cycle complete - detection stopped",
+                    (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 255, 0),
+                    2,
+                )
+                cv2.imshow("yolo + hand-eye", frame)
+                cv2.waitKey(1)
+                break
+
             result = model.predict(
                 source=frame,
                 conf=args.conf,
                 verbose=False,
-                imgsz=args.imgsz,
             )[0]
 
             best_idx = select_best_box(result, allowed)
@@ -184,16 +214,11 @@ def detection_loop(args: argparse.Namespace) -> None:
                     2,
                 )
 
-                now = time.time()
-                if (not busy_flag.is_set()) and conf >= args.min_pick_conf and (now - last_sent) >= args.cooldown:
+                if (not busy_flag.is_set()) and conf >= args.min_pick_conf:
                     target_queue.put((rx, ry, args.z_height, cls_id))
                     busy_flag.set()
-                    last_sent = now
-                    status = "Target sent to robot"
-                elif busy_flag.is_set():
-                    status = "Robot busy"
-                else:
-                    status = "Holding target"
+                    detection_triggered = True
+                    status = "Target locked. Robot moving."
 
             cv2.putText(frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             cv2.imshow("yolo + hand-eye", frame)
@@ -212,26 +237,42 @@ def detection_loop(args: argparse.Namespace) -> None:
 # --------------------------------------------------------------------------- #
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Combine YOLOv8 detection with homography-based hand-eye calibration")
-    parser.add_argument("--weights", type=str, default="best.pt", help="YOLO model weights")
-    parser.add_argument("--camera-id", type=int, default=0, help="OpenCV camera index")
-    parser.add_argument("--width", type=int, default=1280, help="Camera capture width")
-    parser.add_argument("--height", type=int, default=720, help="Camera capture height")
-    parser.add_argument("--fps", type=int, default=30, help="Camera FPS hint")
-    parser.add_argument("--imgsz", type=int, default=640, help="YOLO inference size")
-    parser.add_argument("--conf", type=float, default=0.35, help="YOLO detection confidence threshold")
+    parser.add_argument("--weights", type=str, default=r"D:\yolo\runs\detect\train\weights\best.pt", help="YOLO model weights")
+    parser.add_argument("--camera-id", type=int, default=2, help="OpenCV camera index")
+    parser.add_argument("--conf", type=float, default=0.5, help="YOLO detection confidence threshold")
     parser.add_argument("--min-pick-conf", type=float, default=0.5, help="Minimum confidence to send a pick command")
     parser.add_argument("--classes", nargs="*", help="Optional class name filter for picking")
     parser.add_argument("--parms-dir", type=str, default="save_parms", help="Directory containing homography.npy")
     parser.add_argument("--z-height", type=float, default=70.0, help="Table Z height for picking (mm)")
-    parser.add_argument("--approach", type=float, default=40.0, help="Approach offset above the table (mm)")
-    parser.add_argument("--cooldown", type=float, default=3.0, help="Minimum seconds between pick commands")
     parser.add_argument("--speed", type=int, default=50, help="Robot move speed hint")
-    parser.add_argument("--settle", type=float, default=0.5, help="Pause after each move (s)")
-    parser.add_argument("--grasp-time", type=float, default=1.0, help="Hold time at grasp height (s)")
-    parser.add_argument("--host", type=str, default="127.0.0.1", help="Robot IP address")
+    parser.add_argument("--hold-time", type=float, default=5.0, help="Pause at target position before returning (s)")
+    parser.add_argument("--settle", type=float, default=0.5, help="Pause after return move (s)")
+    parser.add_argument("--host", type=str, default="10.149.65.232", help="Robot IP address")
     parser.add_argument("--port", type=int, default=5000, help="Robot TCP port")
     parser.add_argument("--dry-run", action="store_true", help="Print commands instead of sending to robot")
-    parser.add_argument("--skip-enable", action="store_true", help="Do not send motor enable command on connect")
+    parser.add_argument("--skip-enable", action="store_true", help="(Ignored) Motors are always enabled for safety")
+    parser.add_argument(
+        "--home-first",
+        dest="home_first",
+        action="store_true",
+        default=True,
+        help="Send S10 F1 once after enabling motors (recommended)",
+    )
+    parser.add_argument(
+        "--no-home-first",
+        dest="home_first",
+        action="store_false",
+        help="Skip the homing move after enabling motors",
+    )
+    parser.add_argument(
+        "--ground-clearance",
+        type=float,
+        default=None,
+        help="Optional ground clearance height to set via S3 (mm)",
+    )
+    parser.add_argument("--calib-x", type=float, default=0.0, help="Calibration/home X to return after move (mm)")
+    parser.add_argument("--calib-y", type=float, default=200.0, help="Calibration/home Y to return after move (mm)")
+    parser.add_argument("--calib-z", type=float, default=90.0, help="Calibration/home Z to return after move (mm)")
     return parser.parse_args()
 
 
